@@ -43,16 +43,5 @@ And for build rom, run this command in terminal from your working dir
 
 Good luck and Happy building. (^_^)/
 
-
-
-To apply patches 
-for example:  audio.patch
- got to frameworks/av  copy the patch in that directory and open 
-terminal and run command 
-where 1st command is to apply patch and 
-the 2nd for to revert the patches which applied earlier
-
-		patch -p1 < audio.patch
-		patch -R -p1 <audio.patch
 # android_device_samsung_vivalto3gvn
 # android_device_samsung_vivalto3gvn
