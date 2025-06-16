@@ -1,0 +1,194 @@
+package com.android.internal.telephony;
+
+import static com.android.internal.telephony.RILConstants.*;
+
+import android.content.Context;
+import android.os.AsyncResult;
+import android.os.Message;
+import android.os.Parcel;
+import android.os.SystemProperties;
+import android.telephony.PhoneNumberUtils;
+import android.telephony.Rlog;
+
+import com.android.internal.telephony.uicc.SpnOverride;
+
+import java.util.ArrayList;
+import java.util.Collections;
+
+public class SamsungSPRDRIL extends RIL implements CommandsInterface {
+
+    public SamsungSPRDRIL(Context context, int networkMode, int cdmaSubscription) {
+        super(context, networkMode, cdmaSubscription);
+        mQANElements = SystemProperties.getInt("ro.telephony.ril_qanelements", 6);
+    }
+
+    public void dial(String address, int clirMode, UUSInfo uusInfo, Message result) {
+        RILRequest rr = RILRequest.obtain(RIL_REQUEST_DIAL, result);
+
+        rr.mParcel.writeString(address);
+        rr.mParcel.writeInt(clirMode);
+        rr.mParcel.writeInt(0);     // call_type
+        rr.mParcel.writeInt(1);     // call_domain
+        rr.mParcel.writeString(""); // csv
+
+        if (uusInfo == null) {
+            rr.mParcel.writeInt(0);
+        } else {
+            rr.mParcel.writeInt(1);
+            rr.mParcel.writeInt(uusInfo.getType());
+            rr.mParcel.writeInt(uusInfo.getDcs());
+            rr.mParcel.writeByteArray(uusInfo.getUserData());
+        }
+
+        if (RILJ_LOGD) riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
+        send(rr);
+    }
+
+    public void setUiccSubscription(int slotId, int appIndex, int subId,
+                                     int subStatus, Message result) {
+        if (RILJ_LOGD) riljLog("setUiccSubscription " + slotId + " " + appIndex + " " + subId + " " + subStatus);
+
+        AsyncResult.forMessage(result, 0, null);
+        result.sendToTarget();
+
+        // В AOSP KitKat нет mSubscriptionStatusRegistrants — удалено
+    }
+
+    public void setDataSubscription(Message result) {
+        if (RILJ_LOGD) riljLog("Setting data subscription (single SIM default)");
+        invokeOemRilRequestRaw(new byte[] {(byte) 9, (byte) 4}, result);
+    }
+
+    public void setDefaultVoiceSub(int subIndex, Message response) {
+        AsyncResult.forMessage(response, 0, null);
+        response.sendToTarget();
+    }
+
+    protected void notifyRegistrantsRilConnectionChanged(int rilVer) {
+        super.notifyRegistrantsRilConnectionChanged(rilVer);
+        if (rilVer != -1) {
+            riljLog("Set data subscription to allow data in single SIM mode");
+            setDataSubscription(null);
+        }
+    }
+
+    protected Object responseCallList(Parcel p) {
+        int num;
+        int voiceSettings;
+        ArrayList<DriverCall> response;
+        DriverCall dc;
+
+        num = p.readInt();
+        response = new ArrayList<DriverCall>(num);
+
+        if (RILJ_LOGV) {
+            riljLog("responseCallList: num=" + num);
+        }
+
+        for (int i = 0; i < num; i++) {
+            dc = new DriverCall();
+
+            dc.state = DriverCall.stateFromCLCC(p.readInt());
+            dc.index = p.readInt() & 0xff;
+            dc.TOA = p.readInt();
+            dc.isMpty = (0 != p.readInt());
+            dc.isMT = (0 != p.readInt());
+            dc.als = p.readInt();
+            voiceSettings = p.readInt();
+            dc.isVoice = (0 != voiceSettings);
+            p.readInt(); // isVideo
+            p.readInt(); // call_type
+            p.readInt(); // call_domain
+            p.readString(); // csv
+            dc.isVoicePrivacy = (0 != p.readInt());
+            dc.number = p.readString();
+            int np = p.readInt();
+            dc.numberPresentation = DriverCall.presentationFromCLIP(np);
+            dc.name = p.readString();
+            dc.namePresentation = p.readInt();
+            int uusInfoPresent = p.readInt();
+            if (uusInfoPresent == 1) {
+                dc.uusInfo = new UUSInfo();
+                dc.uusInfo.setType(p.readInt());
+                dc.uusInfo.setDcs(p.readInt());
+                dc.uusInfo.setUserData(p.createByteArray());
+}
+
+            dc.number = PhoneNumberUtils.stringFromStringAndTOA(dc.number, dc.TOA);
+
+            response.add(dc);
+
+            if (dc.isVoicePrivacy) {
+                mVoicePrivacyOnRegistrants.notifyRegistrants();
+            } else {
+                mVoicePrivacyOffRegistrants.notifyRegistrants();
+            }
+        }
+
+        Collections.sort(response);
+        return response;
+    }
+
+    protected RILRequest processSolicited(Parcel p) {
+        int serial = p.readInt();
+        int error = p.readInt();
+
+        RILRequest rr = findAndRemoveRequestFromList(serial);
+        if (rr == null) {
+            Rlog.w(RILJ_LOG_TAG, "Unexpected solicited response! sn: " + serial + " error: " + error);
+            return null;
+        }
+
+        Object ret = null;
+        if (error == 0 || p.dataAvail() > 0) {
+            try {
+                switch (rr.mRequest) {
+                    case RIL_REQUEST_GET_SIM_STATUS: ret = responseIccCardStatus(p); break;
+                    case RIL_REQUEST_ENTER_SIM_PIN: ret = responseInts(p); break;
+                    case RIL_REQUEST_ENTER_SIM_PUK: ret = responseInts(p); break;
+                    case RIL_REQUEST_ENTER_SIM_PIN2: ret = responseInts(p); break;
+                    case RIL_REQUEST_ENTER_SIM_PUK2: ret = responseInts(p); break;
+                    case RIL_REQUEST_CHANGE_SIM_PIN: ret = responseInts(p); break;
+                    case RIL_REQUEST_CHANGE_SIM_PIN2: ret = responseInts(p); break;
+                    case RIL_REQUEST_GET_CURRENT_CALLS: ret = responseCallList(p); break;
+                    case RIL_REQUEST_DIAL: ret = responseVoid(p); break;
+                    case RIL_REQUEST_GET_IMSI: ret = responseString(p); break;
+                    case RIL_REQUEST_HANGUP: ret = responseVoid(p); break;
+                    case RIL_REQUEST_SIGNAL_STRENGTH: ret = responseSignalStrength(p); break;
+                    case RIL_REQUEST_VOICE_REGISTRATION_STATE: ret = responseStrings(p); break;
+                    case RIL_REQUEST_DATA_REGISTRATION_STATE: ret = responseStrings(p); break;
+                    case RIL_REQUEST_OPERATOR: ret = responseStrings(p); break;
+                    default:
+                        throw new RuntimeException("Unrecognized solicited response: " + rr.mRequest);
+                }
+            } catch (Throwable tr) {
+                Rlog.w(RILJ_LOG_TAG, rr.serialString() + "< " + requestToString(rr.mRequest)
+                        + " exception, possible invalid RIL response", tr);
+                if (rr.mResult != null) {
+                    AsyncResult.forMessage(rr.mResult, null, tr);
+                    rr.mResult.sendToTarget();
+                }
+                return rr;
+            }
+        }
+
+        if (error != 0) {
+            rr.onError(error, ret);
+            return rr;
+        }
+
+        if (RILJ_LOGD) riljLog(rr.serialString() + "< " + requestToString(rr.mRequest)
+                + " " + retToString(rr.mRequest, ret));
+
+        if (rr.mResult != null) {
+            AsyncResult.forMessage(rr.mResult, ret, null);
+            rr.mResult.sendToTarget();
+        }
+
+        return rr;
+    }
+
+    private void invokeOemRilRequestSprd(byte key, byte value, Message response) {
+        invokeOemRilRequestRaw(new byte[] { 'S', 'P', 'R', 'D', key, value }, response);
+    }
+}               
